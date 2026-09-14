@@ -29,7 +29,7 @@ class UpworkFitResult(BaseModel):
 
 # --- Page Setup ---
 st.set_page_config(page_title="HyperGrow Upwork Fit Scorer", page_icon="⚡", layout="wide")
-st.title("⚡ Upwork Job Scorer & Proposal Generator")
+st.title("Upwork Job Scorer & Proposal Generator")
 st.caption("Score job fit and generate proposals tailored to HyperGrow's portfolio.")
 
 # Sidebar Configuration
