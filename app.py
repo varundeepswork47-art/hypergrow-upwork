@@ -16,95 +16,97 @@ except ImportError:
         "Key projects: RecruitKar, Vzoq, Rezume, Retail AI kiosk, Courtyardly."
     )
 
-# --- Structured Output Schema ---
+# --- Schema for Structured Output ---
 class UpworkFitResult(BaseModel):
-    fit_score: int = Field(description="Score between 1 and 100 for HyperGrow fit.")
+    fit_score: int = Field(description="Score between 1 and 100 for HyperGrow agency fit.")
     verdict: str = Field(description="APPLY, CAUTION, or SKIP.")
     summary: str = Field(description="One-sentence executive summary.")
-    pros: list[str] = Field(description="2-3 reasons why this matches HyperGrow.")
+    pros: list[str] = Field(description="2-3 bullet reasons why this matches HyperGrow.")
     red_flags: list[str] = Field(description="Risks or warnings. Empty if none.")
-    relevant_case_study: str = Field(description="Closest HyperGrow case study.")
+    relevant_case_study: str = Field(description="Closest HyperGrow case study name.")
     proposal: str = Field(description="Tailored Upwork proposal ready to submit.")
 
-# --- Streamlit UI Config ---
+# --- Page Setup ---
 st.set_page_config(page_title="HyperGrow Upwork Fit Scorer", page_icon="⚡", layout="wide")
-
 st.title("Upwork Job Scorer & Proposal Generator")
-st.caption("Evaluate Upwork jobs against HyperGrow's core strengths without wasting connects.")
+st.caption("Score job fit and generate proposals tailored to HyperGrow's portfolio.")
 
-# Sidebar: Provider & Secrets setup
+# Sidebar Configuration
 with st.sidebar:
     st.header("Setup")
-    provider = st.selectbox("AI provider", ["Google (Gemini)"], index=0)
+    st.text("AI Provider: Google Gemini")
     
-    # Check secrets or allow manual input
     default_key = st.secrets.get("GEMINI_API_KEY", "")
-    api_key = st.text_input("API key", value=default_key, type="password")
+    api_key = st.text_input("Gemini API Key", value=default_key, type="password")
     
     st.divider()
-    st.subheader("Score thresholds")
+    st.subheader("Score Thresholds")
     apply_threshold = st.slider("Apply above", min_value=50, max_value=90, value=70)
 
-# Main Job Input Area
+# Main Job Input Area (Single column for everything)
 job_text = st.text_area(
     "Paste Upwork Job Post",
-    height=260,
-    placeholder="Paste the full job post here (including title, description, skills, and any budget/client details if available)..."
+    height=280,
+    placeholder="Paste the full job post here (title, description, skills, budget/client info if present)..."
 )
 
 if st.button("Analyze fit", type="primary"):
     if not api_key.strip():
-        st.error("Please enter a Gemini API Key in the sidebar or in `.streamlit/secrets.toml`.")
+        st.error("Please provide a Gemini API Key in the sidebar or via `.streamlit/secrets.toml`.")
     elif not job_text.strip():
         st.warning("Please paste a job description first.")
     else:
-        with st.spinner("Analyzing fit against HyperGrow profile..."):
+        with st.spinner("Evaluating job with Gemini 3.6 Flash..."):
             try:
-                # Initialize Gemini Client
+                # Initialize Gemini client
                 client = genai.Client(api_key=api_key.strip())
 
                 prompt = f"""
-You are the business development director for HyperGrow.
-Evaluate this Upwork job posting against HyperGrow's portfolio, capabilities, and target clients.
+You are the business development lead for HyperGrow.
+Evaluate this Upwork job posting against HyperGrow's portfolio and core capabilities.
 
 Agency Profile:
 {HYPERGROW_PROFILE}
 
-Upwork Job Posting:
+Job Posting:
 {job_text}
 
-Instructions:
-1. Evaluate if this matches our capabilities: AI voice agents, WhatsApp/chat assistants, n8n automations, and AI SaaS applications.
-2. If budget, client history, or payment status are not provided in the post, do not penalize the score—evaluate purely on technical and operational fit.
-3. Recommend:
-   - APPLY if score >= {apply_threshold}
-   - CAUTION if score is between {apply_threshold - 15} and {apply_threshold - 1}
-   - SKIP if score < {apply_threshold - 15}
-4. Write a tailored proposal highlighting the most relevant case study (e.g., RecruitKar, Vzoq, Rezume, Retail AI Kiosk, Courtyardly).
+Evaluation Rules:
+1. Score from 1-100 based on technical and operational alignment:
+   - Voice agents (Vapi, Twilio, ElevenLabs)
+   - WhatsApp & chat agents (RAG, multilingual)
+   - Automations (n8n, Zapier, HubSpot integrations)
+   - AI SaaS engineering (FastAPI, Next.js, PostgreSQL)
+2. If budget, client history, or payment verification are missing, DO NOT penalize the score. Evaluate based purely on the technical requirements and project scope.
+3. Recommendation rules:
+   - Score >= {apply_threshold} -> 'APPLY'
+   - Score between {apply_threshold - 15} and {apply_threshold - 1} -> 'CAUTION'
+   - Score < {apply_threshold - 15} -> 'SKIP'
+4. Provide a punchy, tailored Upwork proposal citing the best matching HyperGrow project (e.g., RecruitKar, Vzoq, Rezume, Retail AI Kiosk, or Courtyardly).
 """
 
-                # Automatically using gemini-2.5-flash with structured JSON schema
+                # Calling gemini-3.6-flash with structured JSON output
                 response = client.models.generate_content(
-                    model="gemini-2.5-flash",
+                    model="gemini-3.6-flash",
                     contents=prompt,
                     config=types.GenerateContentConfig(
                         response_mime_type="application/json",
                         response_schema=UpworkFitResult,
-                        temperature=0.2,
                     ),
                 )
 
                 data = json.loads(response.text)
 
-                # Display Results
+                # Render Metrics
                 st.divider()
                 col1, col2, col3 = st.columns(3)
-                col1.metric("Fit Score", f"{data['fit_score']}/100")
-                col2.metric("Recommendation", data["verdict"])
-                col3.metric("Best Case Study", data["relevant_case_study"])
+                col1.metric("Fit Score", f"{data.get('fit_score', 0)}/100")
+                col2.metric("Recommendation", data.get("verdict", "N/A"))
+                col3.metric("Best Case Study", data.get("relevant_case_study", "N/A"))
 
-                st.info(data["summary"])
+                st.info(data.get("summary", ""))
 
+                # Two-Column Results
                 col_left, col_right = st.columns(2)
                 with col_left:
                     st.subheader("Why this is a fit")
@@ -118,7 +120,7 @@ Instructions:
 
                 with col_right:
                     st.subheader("Tailored Proposal")
-                    st.text_area("Copy Proposal", value=data.get("proposal", ""), height=300)
+                    st.text_area("Copy Proposal", value=data.get("proposal", ""), height=320)
 
             except Exception as e:
                 st.error(f"Couldn't score this job: {e}")
