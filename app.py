@@ -1,4 +1,5 @@
 import json
+import time
 import streamlit as st
 from google import genai
 from google.genai import types
@@ -28,7 +29,7 @@ class UpworkFitResult(BaseModel):
 
 # --- Page Setup ---
 st.set_page_config(page_title="HyperGrow Upwork Fit Scorer", page_icon="⚡", layout="wide")
-st.title("Upwork Job Scorer & Proposal Generator")
+st.title("⚡ Upwork Job Scorer & Proposal Generator")
 st.caption("Score job fit and generate proposals tailored to HyperGrow's portfolio.")
 
 # Sidebar Configuration
@@ -56,12 +57,9 @@ if st.button("Analyze fit", type="primary"):
     elif not job_text.strip():
         st.warning("Please paste a job description first.")
     else:
-        with st.spinner("Evaluating job with Gemini 3.6 Flash..."):
-            try:
-                # Initialize Gemini client
-                client = genai.Client(api_key=api_key.strip())
+        client = genai.Client(api_key=api_key.strip())
 
-                prompt = f"""
+        prompt = f"""
 You are the business development lead for HyperGrow.
 Evaluate this Upwork job posting against HyperGrow's portfolio and core capabilities.
 
@@ -85,16 +83,41 @@ Evaluation Rules:
 4. Provide a punchy, tailored Upwork proposal citing the best matching HyperGrow project (e.g., RecruitKar, Vzoq, Rezume, Retail AI Kiosk, or Courtyardly).
 """
 
-                # Calling gemini-3.6-flash with structured JSON output
-                response = client.models.generate_content(
-                    model="gemini-3.6-flash",
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        response_schema=UpworkFitResult,
-                    ),
-                )
+        # Priority model cascade: Try primary, fallback to alternates if 503/429 occurs
+        candidate_models = ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-1.5-flash"]
+        response = None
+        used_model = None
 
+        with st.spinner("Evaluating job with Gemini..."):
+            for model_name in candidate_models:
+                try:
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            response_mime_type="application/json",
+                            response_schema=UpworkFitResult,
+                        ),
+                    )
+                    used_model = model_name
+                    break  # Request succeeded, exit cascade
+                except Exception as err:
+                    err_msg = str(err)
+                    # If server is overloaded (503) or rate-limited (429), try next model
+                    if "503" in err_msg or "UNAVAILABLE" in err_msg:
+                        st.warning(f"Model `{model_name}` is experiencing high Google demand (503). Retrying with backup model...")
+                        time.sleep(1.5)
+                        continue
+                    elif "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
+                        st.warning(f"Model `{model_name}` reached free-tier rate limit (429). Trying fallback model...")
+                        time.sleep(1.5)
+                        continue
+                    else:
+                        st.error(f"Error on {model_name}: {err_msg}")
+                        break
+
+        if response and response.text:
+            try:
                 data = json.loads(response.text)
 
                 # Render Metrics
@@ -104,7 +127,7 @@ Evaluation Rules:
                 col2.metric("Recommendation", data.get("verdict", "N/A"))
                 col3.metric("Best Case Study", data.get("relevant_case_study", "N/A"))
 
-                st.info(data.get("summary", ""))
+                st.info(f"**Summary:** {data.get('summary', '')} *(Generated using {used_model})*")
 
                 # Two-Column Results
                 col_left, col_right = st.columns(2)
@@ -122,5 +145,7 @@ Evaluation Rules:
                     st.subheader("Tailored Proposal")
                     st.text_area("Copy Proposal", value=data.get("proposal", ""), height=320)
 
-            except Exception as e:
-                st.error(f"Couldn't score this job: {e}")
+            except Exception as parse_err:
+                st.error(f"Failed to parse response: {parse_err}")
+        elif not response:
+            st.error("All Gemini models are temporarily at peak traffic capacity. Please wait 30 seconds and click 'Analyze fit' again.")
