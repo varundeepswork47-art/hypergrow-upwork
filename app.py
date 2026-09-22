@@ -1,5 +1,8 @@
+import json
+import time
 import streamlit as st
-from openai import OpenAI
+from google import genai
+from google.genai import types
 from pydantic import BaseModel, Field
 
 # Import the HyperGrow profile
@@ -20,7 +23,7 @@ class UpworkFitResult(BaseModel):
     verdict: str = Field(description="APPLY, CAUTION, or SKIP.")
     summary: str = Field(description="One-sentence executive summary.")
     pros: list[str] = Field(description="2-3 bullet reasons why this matches HyperGrow.")
-    red_flags: list[str] = Field(description="Risks, warnings, or constraints. Empty if none.")
+    red_flags: list[str] = Field(description="Risks, client warnings, or constraints. Empty if none.")
     relevant_case_study: str = Field(description="Closest HyperGrow case study name.")
     proposal: str = Field(description="Tailored Upwork proposal ready to submit.")
 
@@ -32,11 +35,10 @@ st.caption("Score job fit and generate proposals tailored to HyperGrow's portfol
 # Sidebar Configuration
 with st.sidebar:
     st.header("Setup")
-    st.text("AI Provider: OpenAI (ChatGPT)")
+    st.text("AI Provider: Google Gemini")
     
-    # Read from Streamlit secrets or let user paste key
-    default_key = st.secrets.get("OPENAI_API_KEY", "")
-    api_key = st.text_input("OpenAI API Key", value=default_key, type="password", placeholder="sk-...")
+    default_key = st.secrets.get("GEMINI_API_KEY", "")
+    api_key = st.text_input("Gemini API Key", value=default_key, type="password")
     
     st.divider()
     st.subheader("Score Thresholds")
@@ -51,15 +53,13 @@ job_text = st.text_area(
 
 if st.button("Analyze fit", type="primary"):
     if not api_key.strip():
-        st.error("Please provide an OpenAI API Key in the sidebar or via Streamlit Secrets (`OPENAI_API_KEY`).")
+        st.error("Please provide a Gemini API Key in the sidebar or via `.streamlit/secrets.toml`.")
     elif not job_text.strip():
         st.warning("Please paste a job description first.")
     else:
-        with st.spinner("Evaluating job with OpenAI..."):
-            try:
-                client = OpenAI(api_key=api_key.strip())
+        client = genai.Client(api_key=api_key.strip())
 
-                prompt = f"""
+        prompt = f"""
 You are the business development director for HyperGrow.
 Evaluate this Upwork job posting against HyperGrow's portfolio, capabilities, and target clients.
 
@@ -69,53 +69,84 @@ Agency Profile:
 Job Posting:
 {job_text}
 
-Instructions:
-1. Evaluate if this matches our capabilities: AI voice agents (Vapi, Twilio), WhatsApp/chat assistants, n8n automations, and AI SaaS applications.
-2. If budget, client history, or payment verification are missing from the post, do NOT penalize the score—evaluate purely on technical and operational fit.
-3. Check for specific red flags or constraints (e.g. client says "no agencies", unrealistic scope, or missing screening questions).
+Evaluation Rules:
+1. Score from 1-100 based on technical and operational alignment:
+   - Voice agents (Vapi, Twilio, ElevenLabs)
+   - WhatsApp & chat agents (RAG, multilingual)
+   - Automations (n8n, Zapier, HubSpot integrations)
+   - AI SaaS engineering (FastAPI, Next.js, PostgreSQL)
+2. If budget, client history, or payment verification are missing, DO NOT penalize the score. Evaluate based purely on the technical requirements and project scope.
+3. Check for specific red flags (e.g., client says "no agencies", unrealistic scope, or missing screening questions).
 4. Recommendation rules:
    - Score >= {apply_threshold} -> 'APPLY'
    - Score between {apply_threshold - 15} and {apply_threshold - 1} -> 'CAUTION'
    - Score < {apply_threshold - 15} -> 'SKIP'
-5. Write a punchy, tailored Upwork proposal citing the best matching HyperGrow project (e.g., RecruitKar, Vzoq, Rezume, Retail AI Kiosk, Courtyardly). If the post requires a specific keyword or phrase at the top, make sure it is included.
+5. Provide a punchy, tailored Upwork proposal citing the best matching HyperGrow project (e.g., RecruitKar, Vzoq, Rezume, Retail AI Kiosk, or Courtyardly). If the post requires a screening question or specific phrase at the top, make sure it is included.
 """
 
-                # Call OpenAI with native Pydantic structured output
-                completion = client.beta.chat.completions.parse(
-                    model="gpt-4o-mini",
-                    messages=[
-                        {"role": "system", "content": "You are a professional B2B agency evaluation expert."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    response_format=UpworkFitResult
-                )
+        # Model pool prioritized by availability: Flash-Lite endpoints have significantly higher capacity
+        model_pool = ["gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-3.5-flash"]
+        response = None
+        successful_model = None
 
-                result: UpworkFitResult = completion.choices[0].message.parsed
+        with st.spinner("Analyzing job with Gemini..."):
+            for model_name in model_pool:
+                # Up to 2 attempts per model with a brief backoff
+                for attempt in range(2):
+                    try:
+                        response = client.models.generate_content(
+                            model=model_name,
+                            contents=prompt,
+                            config=types.GenerateContentConfig(
+                                response_mime_type="application/json",
+                                response_schema=UpworkFitResult,
+                            ),
+                        )
+                        if response and response.text:
+                            successful_model = model_name
+                            break
+                    except Exception as err:
+                        err_str = str(err)
+                        # Handle Google 503 (Overloaded) or 429 (Rate Limit)
+                        if "503" in err_str or "UNAVAILABLE" in err_str or "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                            time.sleep(2)
+                            continue
+                        else:
+                            break
 
-                # Top Metrics
+                if response and response.text:
+                    break
+
+        if response and response.text:
+            try:
+                data = json.loads(response.text)
+
+                # Render Metrics
                 st.divider()
                 col1, col2, col3 = st.columns(3)
-                col1.metric("Fit Score", f"{result.fit_score}/100")
-                col2.metric("Recommendation", result.verdict)
-                col3.metric("Best Case Study", result.relevant_case_study)
+                col1.metric("Fit Score", f"{data.get('fit_score', 0)}/100")
+                col2.metric("Recommendation", data.get("verdict", "N/A"))
+                col3.metric("Best Case Study", data.get("relevant_case_study", "N/A"))
 
-                st.info(f"**Summary:** {result.summary}")
+                st.info(f"**Summary:** {data.get('summary', '')}")
 
                 # Two-Column Results
                 col_left, col_right = st.columns(2)
                 with col_left:
                     st.subheader("Why this is a fit")
-                    for pro in result.pros:
+                    for pro in data.get("pros", []):
                         st.markdown(f"- {pro}")
 
-                    if result.red_flags:
+                    if data.get("red_flags"):
                         st.subheader("Watch out for")
-                        for flag in result.red_flags:
+                        for flag in data.get("red_flags", []):
                             st.markdown(f"- ⚠️ {flag}")
 
                 with col_right:
                     st.subheader("Tailored Proposal")
-                    st.text_area("Copy Proposal", value=result.proposal, height=320)
+                    st.text_area("Copy Proposal", value=data.get("proposal", ""), height=320)
 
-            except Exception as e:
-                st.error(f"Couldn't score this job: {e}")
+            except Exception as parse_err:
+                st.error(f"Failed to parse model response: {parse_err}")
+        else:
+            st.error("Google's API servers are momentarily at capacity across multiple clusters. Please wait 15–20 seconds and click 'Analyze fit' again.")
